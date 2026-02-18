@@ -20,6 +20,7 @@ st.markdown(
 
 O app calcula:
 - **ICC(2,k)** (two-way random, *absolute agreement*, *average measures*) + **p-value** (H0: ICC=0)
+- **IC 95% do ICC(2,k)** (bootstrap por sujeitos)
 - **SEM** e **MDC95**
 - **Bland–Altman** (viés e limites de concordância)
 - **Correlação de Pearson (r)** + **p-value**
@@ -96,6 +97,47 @@ def icc_2_k(data: np.ndarray) -> dict:
     }
 
 
+def bootstrap_icc2k_ci(
+    data: np.ndarray,
+    n_boot: int = 2000,
+    ci: float = 0.95,
+    random_state: int | None = 0,
+) -> dict:
+    """
+    IC do ICC(2,k) via bootstrap por sujeitos (reamostra linhas).
+    Retorna percentis (2.5%, 97.5%) por padrão.
+
+    Observação: para n muito pequeno, o IC pode ficar instável.
+    """
+    if data.ndim != 2:
+        raise ValueError("data must be 2D (n_subjects x k_raters).")
+    n, k = data.shape
+    if n < 3:
+        return {"low": np.nan, "high": np.nan, "n_ok": 0, "n_boot": n_boot}
+
+    rng = np.random.default_rng(random_state)
+    iccs = []
+
+    for _ in range(int(n_boot)):
+        idx = rng.integers(0, n, size=n)  # reamostra sujeitos
+        sample = data[idx, :]
+        try:
+            out = icc_2_k(sample)
+            v = out["ICC(2,k)"]
+            if np.isfinite(v):
+                iccs.append(v)
+        except Exception:
+            pass
+
+    if len(iccs) < max(30, 0.1 * n_boot):
+        return {"low": np.nan, "high": np.nan, "n_ok": len(iccs), "n_boot": n_boot}
+
+    alpha = 1.0 - ci
+    low = float(np.percentile(iccs, 100 * (alpha / 2)))
+    high = float(np.percentile(iccs, 100 * (1 - alpha / 2)))
+    return {"low": low, "high": high, "n_ok": len(iccs), "n_boot": n_boot}
+
+
 def pearson_with_p(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
     """Pearson r and two-sided p-value."""
     x = np.asarray(x)
@@ -155,6 +197,22 @@ data_icc = np.column_stack([x, y])
 icc_out = icc_2_k(data_icc)
 icc2k = icc_out["ICC(2,k)"]
 
+# -------------------------
+# ICC CI settings (bootstrap)
+# -------------------------
+st.subheader("Configurações do IC 95% do ICC(2,k)")
+b1, b2 = st.columns([1, 1])
+with b1:
+    n_boot = st.slider("Nº de reamostragens (bootstrap)", min_value=200, max_value=5000, value=2000, step=200)
+with b2:
+    seed = st.number_input("Seed (reprodutibilidade)", value=0, step=1)
+
+with st.spinner("Calculando IC 95% do ICC(2,k) (bootstrap)..."):
+    icc_ci = bootstrap_icc2k_ci(data_icc, n_boot=int(n_boot), ci=0.95, random_state=int(seed))
+
+icc_ci_low = icc_ci["low"]
+icc_ci_high = icc_ci["high"]
+
 # SEM / MDC settings
 st.subheader("Configurações de SEM/MDC")
 sem_basis = st.radio(
@@ -196,11 +254,18 @@ loa_high = bias + 1.96 * sd_diff
 with left:
     st.subheader("Resultados (numéricos)")
 
+    icc_ci_str = (
+        f"[{icc_ci_low:.4f}, {icc_ci_high:.4f}]"
+        if np.isfinite(icc_ci_low) and np.isfinite(icc_ci_high)
+        else "NA"
+    )
+
     results = pd.DataFrame(
         {
             "Métrica": [
                 "N (pares válidos)",
                 "ICC(2,k)",
+                "ICC(2,k) IC95% (bootstrap)",
                 "p do ICC (H0: ICC=0)",
                 "F do ICC (MSR/MSE)",
                 "ICC(2,1) (extra)",
@@ -216,6 +281,7 @@ with left:
             "Valor": [
                 icc_out["n_subjects"],
                 icc2k,
+                icc_ci_str,
                 icc_out["p_value"],
                 icc_out["F"],
                 icc_out["ICC(2,1)"],
@@ -242,6 +308,7 @@ with left:
             )
         )
         st.caption("ICC(2,k): two-way random, absolute agreement, average measures (k = nº de colunas).")
+        st.caption(f"Bootstrap: n_boot={icc_ci['n_boot']}, válidos={icc_ci['n_ok']}")
 
 with right:
     st.subheader("Gráficos")
